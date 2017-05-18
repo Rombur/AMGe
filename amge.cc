@@ -46,14 +46,14 @@ class Laplace
   public:
     Laplace(unsigned int fe_degree);
 
-    void run(std::string const &preconditioner);
+    void run(std::string const &preconditioner_type);
 
   private:
     void setup_system ();
 
     void assemble_system ();
 
-    void solve(std::string const &preconditioner);
+    void solve(std::string const &preconditioner_type);
 
     void refine_grid ();
 
@@ -61,8 +61,8 @@ class Laplace
 
     unsigned int _fe_degree;
     dealii::Triangulation<dim> _triangulation;
-    dealii::DoFHandler<dim> _dof_handler;
     dealii::FE_Q<dim> _fe;
+    dealii::DoFHandler<dim> _dof_handler;
     dealii::ConstraintMatrix _constraints;
     dealii::SparsityPattern _sparsity_pattern;
     dealii::SparseMatrix<double> _system_matrix;
@@ -76,8 +76,8 @@ template <int dim>
 Laplace<dim>::Laplace(unsigned int fe_degree)
   :
     _fe_degree(fe_degree),
-    _dof_handler(_triangulation),
     _fe(_fe_degree),
+    _dof_handler(_triangulation),
     _computing_timer(std::cout,
                      dealii::TimerOutput::summary,
                      dealii::TimerOutput::wall_times)
@@ -170,7 +170,7 @@ void Laplace<dim>::assemble_system()
 
 
 template <int dim>
-void Laplace<dim>::solve(std::string const &preconditioner)
+void Laplace<dim>::solve(std::string const &preconditioner_type)
 {
   dealii::TimerOutput::Scope t(_computing_timer, "solve");
 
@@ -178,7 +178,7 @@ void Laplace<dim>::solve(std::string const &preconditioner)
 
   dealii::SolverCG<dealii::Vector<double>> solver(solver_control);
 
-  if (preconditioner == "identity")
+  if (preconditioner_type == "identity")
   {
     dealii::PreconditionIdentity preconditioner;
 
@@ -232,7 +232,7 @@ void Laplace<dim>::output_results (const unsigned int cycle) const
 
 
 template <int dim>
-void Laplace<dim>::run(std::string const &preconditioner)
+void Laplace<dim>::run(std::string const &preconditioner_type)
 {
   unsigned int const n_cycles = 6;
   for (unsigned int cycle=0; cycle<n_cycles; ++cycle)
@@ -257,7 +257,7 @@ void Laplace<dim>::run(std::string const &preconditioner)
       << std::endl;
 
     assemble_system ();
-    solve(preconditioner);
+    solve(preconditioner_type);
     output_results (cycle);
 
     _computing_timer.print_summary ();
