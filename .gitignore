@@ -1,0 +1,8 @@
+*.vtu
+module_list.sh
+Makefile
+CMakeCache.txt
+CMakeFiles
+amge
+cmake_install.cmake
+compile_commands.json
