@@ -13,6 +13,7 @@
 #include <deal.II/lac/solver_cg.h>
 #include <deal.II/lac/constraint_matrix.h>
 #include <deal.II/lac/dynamic_sparsity_pattern.h>
+#include <deal.II/lac/eigen.h>
 #include <deal.II/lac/precondition.h>
 
 #include <deal.II/grid/grid_generator.h>
@@ -36,6 +37,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <random>
 
 namespace dealii
 {
@@ -50,14 +52,15 @@ namespace dealii
 // patches, do a local assembly, compute local eigenvectors, create the
 // restriction/prolongation matrices, build and invert the coarse matrix. To
 // compute the eigenvalues, first we need to have an approximation of the largest
-// eigenvalue. We then substract this eigenvale to the diagonal of the 
+// eigenvalue. We then substract this eigenvalue to the diagonal of the 
 // patch_system_matrix. Be careful not to touch the constrained entries. Then,
 // use Lanczos to compute the eigenvalues and more importantly the eigenvectors.
 template <int dim, typename VectorType>
 class AMGe
 {
   public:
-    AMGe(unsigned int fe_degree, int n_cells_per_patch);
+    AMGe(unsigned int fe_degree, int n_cells_per_patch, 
+         std::shared_ptr<dealii::DoFHandler<dim>> dof_handler);
     
     void vmult(VectorType &dst, VectorType const &src) const;
 
@@ -83,6 +86,13 @@ class AMGe
                                   dealii::ConstraintMatrix &patch_constraints,     
                                   dealii::SparseMatrix<double> &patch_system_matrix);
 
+    void compute_largest_eigenvalue(dealii::SparseMatrix<double> const &patch_system_matrix,
+                                    double & largest_eigenvalue);
+
+    void shift_eigenvalues(double largest_eigenvalue,
+                           dealii::ConstraintMatrix const &patch_constraints,
+                           dealii::SparseMatrix<double> &patch_system_matrix);
+
     std::shared_ptr<dealii::DoFHandler<dim>> _dof_handler;
     unsigned int _fe_degree;
     dealii::FE_Q<dim> _fe;
@@ -90,8 +100,10 @@ class AMGe
 
 
 template <int dim, typename VectorType>
-AMGe<dim,VectorType>::AMGe(unsigned int fe_degree, int n_cells_per_patch)
+AMGe<dim,VectorType>::AMGe(unsigned int fe_degree, int n_cells_per_patch,
+                           std::shared_ptr<dealii::DoFHandler<dim>> dof_handler)
   :
+    _dof_handler(dof_handler),
     _fe_degree(fe_degree),
     _fe(_fe_degree)
 {
@@ -120,9 +132,16 @@ void AMGe<dim,VectorType>::initialize(int const n_cells_per_patch)
   // different subdomain_id.
   unsigned int const n_partitions = 
     _dof_handler->get_triangulation().n_active_cells() / n_cells_per_patch;
-  dealii::Triangulation<dim> tmp_triangulation = static_cast<dealii::Triangulation<dim>>(
-                                               _dof_handler->get_triangulation());
+  dealii::Triangulation<dim> tmp_triangulation;
+  //TODO this will be slow
+  tmp_triangulation.copy_triangulation(_dof_handler->get_triangulation());
   dealii::GridTools::partition_triangulation(n_partitions, tmp_triangulation);
+  // Copy the partitioning
+  auto dof_cell = _dof_handler->begin_active();
+  auto end_dof_cell = _dof_handler->end();
+  auto tmp_tria_cell = tmp_triangulation.begin_active();
+  for (; dof_cell != end_dof_cell; ++dof_cell, ++tmp_tria_cell)
+    dof_cell->set_subdomain_id(tmp_tria_cell->subdomain_id());
 
   for (unsigned int i=0; i<n_partitions; ++i)
   {
@@ -144,6 +163,14 @@ void AMGe<dim,VectorType>::initialize(int const n_cells_per_patch)
     // Assembly on a patch.
     assemble_system_on_patch(patch_dof_handler, patch_constraints, 
                              patch_system_matrix);
+
+    // Compute largest eigenvalue.
+    double largest_eigenvalue = 0.;
+    compute_largest_eigenvalue(patch_system_matrix, largest_eigenvalue);
+
+    // Shift the eigenvalues so that the smallest ones becomes the largest ones
+    // (in magnitude).
+    shift_eigenvalues(largest_eigenvalue, patch_constraints, patch_system_matrix);
   }
 }
 
@@ -163,7 +190,6 @@ void AMGe<dim,VectorType>::build_patch_triangulation(dealii::types::subdomain_id
     if (cell->subdomain_id() == id)
       patch.push_back(cell);
   }
-
   dealii::GridTools::build_triangulation_from_patch<dealii::DoFHandler<dim>>(
     patch, patch_triangulation, path_to_global_tria_map);
 }
@@ -229,7 +255,7 @@ void AMGe<dim,VectorType>::assemble_system_on_patch(dealii::DoFHandler<dim> &pat
 
     cell->get_dof_indices(local_dof_indices);
 
-    // Diagonal entries corresponding to elimintated degreess of freedom are not
+    // Diagonal entries corresponding to eliminated degrees of freedom are not
     // set, the result have a zero eigenvalue. For solving a source problem
     // Au=f, it is possible to set the diagonal entry after building the matrix
     // for (unsigned int i=0; i<matrix.m(); ++i)
@@ -241,6 +267,38 @@ void AMGe<dim,VectorType>::assemble_system_on_patch(dealii::DoFHandler<dim> &pat
                                                  local_dof_indices,
                                                  patch_system_matrix);
   }
+}
+
+
+template <int dim, typename VectorType>
+void AMGe<dim,VectorType>::compute_largest_eigenvalue(
+  dealii::SparseMatrix<double> const &patch_system_matrix,
+  double &largest_eigenvalue)
+{
+  std::default_random_engine generator(0);
+  std::uniform_real_distribution<double> distribution(0.0,1.0);
+
+  unsigned int const size = patch_system_matrix.m();
+  VectorType eigen_vector(size);
+  for (unsigned int i=0; i<size; ++i)
+    eigen_vector[i] = distribution(generator);
+
+  dealii::SolverControl solver_control(10, 0.1);
+  dealii::GrowingVectorMemory<VectorType> vector_memory;
+  dealii::EigenPower<VectorType> eigen_power(solver_control, vector_memory);
+  eigen_power.solve(largest_eigenvalue, patch_system_matrix, eigen_vector);
+}
+
+
+template <int dim, typename VectorType>
+void AMGe<dim,VectorType>::shift_eigenvalues(double largest_eigenvalue,
+                                             dealii::ConstraintMatrix const &patch_constraints,
+                                             dealii::SparseMatrix<double> &patch_system_matrix)
+{
+  unsigned int const size = patch_system_matrix.m();
+  for (unsigned int i=0; i<size; ++i)
+    if (!patch_constraints.is_constrained(i))
+      patch_system_matrix.diag_element(i) -= largest_eigenvalue;
 }
 
 
@@ -396,7 +454,8 @@ void Laplace<dim, VectorType>::solve(std::string const &preconditioner_type)
   else if (preconditioner_type == "AMGe")
   {
     unsigned int n_cells_per_patch = 2;
-    AMGe<dim, VectorType> preconditioner(_fe_degree, n_cells_per_patch);
+    AMGe<dim, VectorType> preconditioner(_fe_degree, n_cells_per_patch,
+                                         _dof_handler);
 
     solver.solve(_system_matrix, _solution, _system_rhs,
                  preconditioner);
